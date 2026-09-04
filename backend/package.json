@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "db:migrate": "tsx src/migrate.ts",
     "build": "tsc",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit"
@@ -24,4 +25,3 @@
     "typescript": "^5.7.2"
   }
 }
-
