@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express from "express";
 import multer from "multer";
+import { splitIntoChunks } from "./chunking.js";
 import { db } from "./db.js";
 import { extractTextFromFile } from "./text-extraction.js";
 
@@ -117,6 +118,40 @@ function uploadInput(body: Record<string, unknown>): DocumentInput {
   return { ...body, documentYear: year, keywords: uploadedKeywords };
 }
 
+async function saveDocumentChunks(documentId: string, fullText: string): Promise<number> {
+  const chunks = splitIntoChunks(fullText);
+  const client = await db.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM document_chunks WHERE document_id = $1", [documentId]);
+
+    for (const chunk of chunks) {
+      await client.query(
+        `INSERT INTO document_chunks (
+          document_id, chunk_index, content, token_count, character_start, character_end
+        ) VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          documentId,
+          chunk.chunkIndex,
+          chunk.content,
+          chunk.tokenCount,
+          chunk.characterStart,
+          chunk.characterEnd,
+        ],
+      );
+    }
+
+    await client.query("COMMIT");
+    return chunks.length;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN ?? "http://localhost:5173",
@@ -204,6 +239,26 @@ app.get("/api/documents/:id", async (request, response) => {
   }
 });
 
+app.post("/api/documents/:id/chunks", async (request, response) => {
+  try {
+    const result = await db.query<{ id: string; fullText: string }>(
+      `SELECT id, full_text AS "fullText" FROM documents WHERE id = $1`,
+      [request.params.id],
+    );
+
+    if (result.rowCount === 0) {
+      response.status(404).json({ message: "Dokument nije pronađen." });
+      return;
+    }
+
+    const document = result.rows[0];
+    const chunkCount = await saveDocumentChunks(document.id, document.fullText);
+    response.json({ documentId: document.id, chunkCount });
+  } catch {
+    response.status(400).json({ message: "Nije moguće podijeliti dokument na cjeline." });
+  }
+});
+
 app.post("/api/documents/upload", (request, response) => {
   upload.single("file")(request, response, async (uploadError) => {
     if (uploadError) {
@@ -265,9 +320,11 @@ app.post("/api/documents/upload", (request, response) => {
         ],
       );
 
+      const chunkCount = await saveDocumentChunks(result.rows[0].id as string, fullText);
       response.status(201).json({
         document: result.rows[0],
         extractedCharacters: fullText.length,
+        chunkCount,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Nije moguće obraditi dokument.";
@@ -315,7 +372,8 @@ app.post("/api/documents", async (request, response) => {
       ],
     );
 
-    response.status(201).json({ document: result.rows[0] });
+    const chunkCount = await saveDocumentChunks(result.rows[0].id as string, fullText);
+    response.status(201).json({ document: result.rows[0], chunkCount });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Nije moguće sačuvati dokument.";
     response.status(400).json({ message });
