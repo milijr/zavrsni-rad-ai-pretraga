@@ -81,6 +81,8 @@ function App() {
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [selectedDocument, setSelectedDocument] = useState<DocumentDetails | null>(null);
   const [form, setForm] = useState<DocumentForm>(initialForm);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [fileInputKey, setFileInputKey] = useState(0);
   const [apiStatus, setApiStatus] = useState<"loading" | "connected" | "unavailable">("loading");
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -132,20 +134,37 @@ function App() {
     setIsSubmitting(true);
 
     try {
-      const response = await fetch("/api/documents", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...form,
-          documentYear: form.documentYear ? Number(form.documentYear) : undefined,
-          keywords: form.keywords.split(",").map((keyword) => keyword.trim()).filter(Boolean),
-          originalFileName: "rucni-unos.txt",
-        }),
-      });
+      const response = selectedFile
+        ? await (() => {
+            const uploadData = new FormData();
+            uploadData.append("file", selectedFile);
+            uploadData.append("title", form.title);
+            uploadData.append("author", form.author);
+            uploadData.append("documentType", form.documentType);
+            uploadData.append("institution", form.institution);
+            uploadData.append("faculty", form.faculty);
+            uploadData.append("mentor", form.mentor);
+            uploadData.append("documentYear", form.documentYear);
+            uploadData.append("keywords", form.keywords);
+            uploadData.append("abstractLocal", form.abstractLocal);
+            return fetch("/api/documents/upload", { method: "POST", body: uploadData });
+          })()
+        : await fetch("/api/documents", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              ...form,
+              documentYear: form.documentYear ? Number(form.documentYear) : undefined,
+              keywords: form.keywords.split(",").map((keyword) => keyword.trim()).filter(Boolean),
+              originalFileName: "rucni-unos.txt",
+            }),
+          });
 
       if (!response.ok) throw new Error(await apiMessage(response));
       const data = (await response.json()) as { document: DocumentSummary };
       setForm(initialForm);
+      setSelectedFile(null);
+      setFileInputKey((current) => current + 1);
       setSuccess("Dokument je uspješno sačuvan u bazi.");
       await loadDocuments();
       await selectDocument(data.document.id);
@@ -252,8 +271,22 @@ function App() {
             <label>Sažetak
               <textarea rows={4} value={form.abstractLocal} onChange={(event) => updateField("abstractLocal", event.target.value)} placeholder="Kratak opis rada" />
             </label>
+            <label className="file-upload">
+              <span>Fajl dokumenta</span>
+              <span className="file-picker">
+                <input
+                  key={fileInputKey}
+                  type="file"
+                  accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+                />
+                <span className="file-picker-icon">↑</span>
+                <span>{selectedFile ? selectedFile.name : "Izaberi PDF ili DOCX fajl"}</span>
+              </span>
+              <small>{selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB · tekst će se automatski izdvojiti` : "Maksimalna veličina fajla je 15 MB."}</small>
+            </label>
             <label>Tekst dokumenta <span>*</span>
-              <textarea rows={7} value={form.fullText} onChange={(event) => updateField("fullText", event.target.value)} placeholder="Za sada zalijepite tekst ručno. Upload PDF/DOCX-a dodajemo u narednom koraku." required />
+              <textarea rows={7} value={form.fullText} onChange={(event) => updateField("fullText", event.target.value)} placeholder="Zalijepite tekst ručno samo ako ne uploadujete fajl." required={!selectedFile} disabled={Boolean(selectedFile)} />
             </label>
             <button className="primary-button" disabled={isSubmitting} type="submit">
               <span>{isSubmitting ? "Čuvanje..." : "Sačuvaj dokument"}</span>

@@ -1,10 +1,33 @@
 import "dotenv/config";
+import { mkdirSync } from "node:fs";
+import { extname } from "node:path";
+import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express from "express";
+import multer from "multer";
 import { db } from "./db.js";
+import { extractTextFromFile } from "./text-extraction.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
+const uploadDirectory = fileURLToPath(new URL("../uploads/", import.meta.url));
+
+mkdirSync(uploadDirectory, { recursive: true });
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: uploadDirectory,
+    filename: (_request, file, callback) => {
+      const extension = extname(file.originalname).toLowerCase();
+      callback(null, `${crypto.randomUUID()}${extension}`);
+    },
+  }),
+  fileFilter: (_request, file, callback) => {
+    const extension = extname(file.originalname).toLowerCase();
+    callback(null, extension === ".pdf" || extension === ".docx");
+  },
+  limits: { fileSize: 15 * 1024 * 1024, files: 1 },
+});
 
 type DocumentInput = {
   title?: unknown;
@@ -81,6 +104,17 @@ function keywords(value: unknown): string[] {
   }
 
   return value.map((keyword) => keyword.trim()).filter(Boolean);
+}
+
+function uploadInput(body: Record<string, unknown>): DocumentInput {
+  const year = typeof body.documentYear === "string" && body.documentYear.trim()
+    ? Number(body.documentYear)
+    : body.documentYear;
+  const uploadedKeywords = typeof body.keywords === "string"
+    ? body.keywords.split(",").map((keyword) => keyword.trim()).filter(Boolean)
+    : body.keywords;
+
+  return { ...body, documentYear: year, keywords: uploadedKeywords };
 }
 
 app.use(
@@ -168,6 +202,78 @@ app.get("/api/documents/:id", async (request, response) => {
   } catch {
     response.status(400).json({ message: "Neispravan identifikator dokumenta." });
   }
+});
+
+app.post("/api/documents/upload", (request, response) => {
+  upload.single("file")(request, response, async (uploadError) => {
+    if (uploadError) {
+      const message = uploadError instanceof multer.MulterError && uploadError.code === "LIMIT_FILE_SIZE"
+        ? "Fajl je prevelik. Maksimalna veličina je 15 MB."
+        : "Odaberite PDF ili DOCX fajl.";
+      response.status(400).json({ message });
+      return;
+    }
+
+    if (!request.file) {
+      response.status(400).json({ message: "Odaberite PDF ili DOCX fajl za upload." });
+      return;
+    }
+
+    try {
+      const input = uploadInput(request.body as Record<string, unknown>);
+      const title = requiredText(input.title, "title");
+      const author = requiredText(input.author, "author");
+      const fullText = await extractTextFromFile(request.file.path);
+
+      if (!fullText) {
+        throw new Error("Iz odabranog fajla nije moguće izdvojiti tekst.");
+      }
+
+      const result = await db.query(
+        `INSERT INTO documents (
+          title, author, document_type, institution, faculty, study_program,
+          field_of_study, mentor, defense_date, document_year, language_code,
+          abstract_local, abstract_english, keywords, original_file_name,
+          stored_file_path, mime_type, file_size_bytes, full_text
+        ) VALUES (
+          $1, $2, COALESCE($3, 'master_rad'), $4, $5, $6,
+          $7, $8, $9, $10, COALESCE($11, 'sr-Latn'),
+          $12, $13, $14, $15, $16, $17, $18, $19
+        )
+        RETURNING id, title, author, document_type AS "documentType",
+          keywords, created_at AS "createdAt"`,
+        [
+          title,
+          author,
+          optionalText(input.documentType, "documentType"),
+          optionalText(input.institution, "institution"),
+          optionalText(input.faculty, "faculty"),
+          optionalText(input.studyProgram, "studyProgram"),
+          optionalText(input.fieldOfStudy, "fieldOfStudy"),
+          optionalText(input.mentor, "mentor"),
+          optionalDate(input.defenseDate),
+          optionalYear(input.documentYear),
+          optionalText(input.languageCode, "languageCode"),
+          optionalText(input.abstractLocal, "abstractLocal"),
+          optionalText(input.abstractEnglish, "abstractEnglish"),
+          keywords(input.keywords),
+          request.file.originalname,
+          `uploads/${request.file.filename}`,
+          request.file.mimetype,
+          request.file.size,
+          fullText,
+        ],
+      );
+
+      response.status(201).json({
+        document: result.rows[0],
+        extractedCharacters: fullText.length,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Nije moguće obraditi dokument.";
+      response.status(400).json({ message });
+    }
+  });
 });
 
 app.post("/api/documents", async (request, response) => {
