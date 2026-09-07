@@ -168,6 +168,51 @@ app.get("/api/health", async (_request, response) => {
   }
 });
 
+app.get("/api/search/classic", async (request, response) => {
+  const query = typeof request.query.q === "string" ? request.query.q.trim() : "";
+  const requestedLimit = Number(request.query.limit ?? 10);
+  const limit = Number.isInteger(requestedLimit)
+    ? Math.min(Math.max(requestedLimit, 1), 30)
+    : 10;
+
+  if (!query) {
+    response.json({ query, results: [] });
+    return;
+  }
+
+  try {
+    const result = await db.query(
+      `WITH search_query AS (
+        SELECT websearch_to_tsquery('simple'::regconfig, $1) AS value
+      )
+      SELECT
+        d.id,
+        d.title,
+        d.author,
+        d.document_type AS "documentType",
+        d.document_year AS "documentYear",
+        d.keywords,
+        ROUND((ts_rank_cd(d.full_text_search, search_query.value) * 100)::numeric, 2) AS score,
+        ts_headline(
+          'simple'::regconfig,
+          d.full_text,
+          search_query.value,
+          'StartSel=<mark>, StopSel=</mark>, MaxWords=34, MinWords=16, MaxFragments=2, FragmentDelimiter= … '
+        ) AS snippet
+      FROM documents d
+      CROSS JOIN search_query
+      WHERE d.full_text_search @@ search_query.value
+      ORDER BY score DESC, d.created_at DESC
+      LIMIT $2`,
+      [query, limit],
+    );
+
+    response.json({ query, results: result.rows });
+  } catch {
+    response.status(500).json({ message: "Pretraga trenutno nije dostupna." });
+  }
+});
+
 app.get("/api/documents", async (request, response) => {
   const requestedLimit = Number(request.query.limit ?? 20);
   const requestedOffset = Number(request.query.offset ?? 0);

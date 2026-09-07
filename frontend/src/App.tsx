@@ -30,6 +30,17 @@ type DocumentDetails = DocumentSummary & {
   updatedAt: string;
 };
 
+type ClassicSearchResult = {
+  id: string;
+  title: string;
+  author: string;
+  documentType: string;
+  documentYear: number | null;
+  keywords: string[];
+  score: string | number;
+  snippet: string;
+};
+
 type DocumentForm = {
   title: string;
   author: string;
@@ -77,12 +88,32 @@ async function apiMessage(response: Response) {
   return data?.message ?? "Došlo je do neočekivane greške.";
 }
 
+function highlightSnippet(snippet: string) {
+  let isHighlighted = false;
+
+  return snippet.split(/(<mark>|<\/mark>)/).map((part, index) => {
+    if (part === "<mark>") {
+      isHighlighted = true;
+      return null;
+    }
+    if (part === "</mark>") {
+      isHighlighted = false;
+      return null;
+    }
+    return isHighlighted ? <mark key={`${part}-${index}`}>{part}</mark> : part;
+  });
+}
+
 function App() {
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [selectedDocument, setSelectedDocument] = useState<DocumentDetails | null>(null);
   const [form, setForm] = useState<DocumentForm>(initialForm);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<ClassicSearchResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
   const [apiStatus, setApiStatus] = useState<"loading" | "connected" | "unavailable">("loading");
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -116,6 +147,11 @@ function App() {
   }, []);
 
   async function selectDocument(id: string) {
+    if (selectedDocument?.id === id) {
+      setSelectedDocument(null);
+      return;
+    }
+
     setError(null);
     try {
       const response = await fetch(`/api/documents/${id}`);
@@ -124,6 +160,27 @@ function App() {
       setSelectedDocument(data.document);
     } catch (selectionError) {
       setError(selectionError instanceof Error ? selectionError.message : "Nije moguće učitati dokument.");
+    }
+  }
+
+  async function submitClassicSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const query = searchQuery.trim();
+    if (!query) return;
+
+    setError(null);
+    setIsSearching(true);
+    setHasSearched(true);
+    try {
+      const response = await fetch(`/api/search/classic?q=${encodeURIComponent(query)}`);
+      if (!response.ok) throw new Error(await apiMessage(response));
+      const data = (await response.json()) as { results: ClassicSearchResult[] };
+      setSearchResults(data.results);
+    } catch (searchError) {
+      setError(searchError instanceof Error ? searchError.message : "Pretraga nije uspjela.");
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
     }
   }
 
@@ -183,15 +240,9 @@ function App() {
     <main className="app-shell">
       <header className="topbar">
         <a className="brand" href="#vrh" aria-label="Početna stranica">
-          <span className="brand-mark">AI</span>
-          <span><strong>Dokumenta</strong><small>Semantička pretraga</small></span>
+          <span className="brand-mark" aria-hidden="true">📄</span>
+          <span><strong>DOCSME</strong></span>
         </a>
-        <div className={`connection ${apiStatus}`}>
-          <span className="status-dot" />
-          {apiStatus === "connected" && "Baza povezana"}
-          {apiStatus === "loading" && "Provjera veze"}
-          {apiStatus === "unavailable" && "Baza nedostupna"}
-        </div>
       </header>
 
       <section className="hero" id="vrh">
@@ -199,6 +250,17 @@ function App() {
           <p className="eyebrow">Platforma za akademske radove</p>
           <h1>Pronađi znanje, <em>ne samo riječi.</em></h1>
           <p className="hero-copy">Unesi radove, sačuvaj njihove metapodatke i pripremi bazu za klasičnu i semantičku pretragu.</p>
+          <form className="classic-search-form" onSubmit={submitClassicSearch}>
+            <input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Pretraži po naslovu, ključnim riječima ili tekstu rada..."
+              aria-label="Klasična pretraga dokumenata"
+            />
+            <button type="submit" disabled={isSearching}>
+              {isSearching ? "Pretražujem..." : "Pretraži"}
+            </button>
+          </form>
         </div>
 
         <div className="hero-right">
@@ -229,6 +291,39 @@ function App() {
           </div>
         </div>
       </section>
+
+      {hasSearched && (
+        <section className="search-results" aria-live="polite">
+          <div className="search-results-heading">
+            <div>
+              <p className="eyebrow">Klasična full-text pretraga</p>
+              <h2>{isSearching ? "Pretraživanje..." : `${searchResults.length} rezultata za „${searchQuery.trim()}“`}</h2>
+            </div>
+            <button type="button" onClick={() => { setHasSearched(false); setSearchResults([]); }}>
+              Zatvori
+            </button>
+          </div>
+
+          {!isSearching && searchResults.length === 0 && (
+            <p className="no-search-results">Nema podudaranja. Pokušaj sa drugim ključnim riječima.</p>
+          )}
+
+          <div className="search-result-list">
+            {searchResults.map((result) => (
+              <button className="search-result-card" key={result.id} type="button" onClick={() => void selectDocument(result.id)}>
+                <span className="search-score">{Number(result.score).toFixed(2)}</span>
+                <span className="search-result-content">
+                  <span>{documentTypeLabels[result.documentType] ?? "Dokument"}{result.documentYear ? ` · ${result.documentYear}` : ""}</span>
+                  <strong>{result.title}</strong>
+                  <small>{result.author}</small>
+                  <p>{highlightSnippet(result.snippet)}</p>
+                </span>
+                <span className="card-arrow">→</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="workspace" aria-label="Upravljanje dokumentima">
         <aside className="form-panel">
@@ -310,29 +405,32 @@ function App() {
           ) : (
             <div className="document-list">
               {documents.map((document) => (
-                <button className={`document-card ${selectedDocument?.id === document.id ? "selected" : ""}`} key={document.id} type="button" onClick={() => void selectDocument(document.id)}>
-                  <span className="document-index">{document.documentType.includes("master") ? "MR" : "DR"}</span>
-                  <span className="document-card-content">
-                    <span className="document-meta">{documentTypeLabels[document.documentType] ?? "Dokument"}{document.documentYear ? ` · ${document.documentYear}` : ""}</span>
-                    <strong>{document.title}</strong>
-                    <span className="document-author">{document.author}</span>
-                    <span className="tag-row">{document.keywords.slice(0, 3).map((keyword) => <i key={keyword}>{keyword}</i>)}</span>
-                  </span>
-                  <span className="card-arrow">→</span>
-                </button>
+                <div className="document-item" key={document.id}>
+                  <button className={`document-card ${selectedDocument?.id === document.id ? "selected" : ""}`} type="button" onClick={() => void selectDocument(document.id)}>
+                    <span className="document-index">{document.documentType.includes("master") ? "MR" : "DR"}</span>
+                    <span className="document-card-content">
+                      <span className="document-meta">{documentTypeLabels[document.documentType] ?? "Dokument"}{document.documentYear ? ` · ${document.documentYear}` : ""}</span>
+                      <strong>{document.title}</strong>
+                      <span className="document-author">{document.author}</span>
+                      <span className="tag-row">{document.keywords.slice(0, 3).map((keyword) => <i key={keyword}>{keyword}</i>)}</span>
+                    </span>
+                    <span className="card-arrow">→</span>
+                  </button>
+
+                  {selectedDocument?.id === document.id && (
+                    <article className="detail-card detail-card-inline">
+                      <div className="detail-heading"><span>Pregled dokumenta</span></div>
+                      <h3>{selectedDocument.title}</h3>
+                      <p className="detail-byline">{selectedDocument.author} · {selectedDocument.documentYear ?? "Godina nije unesena"}</p>
+                      {selectedDocument.abstractLocal && <p className="detail-abstract">{selectedDocument.abstractLocal}</p>}
+                      <div className="detail-footer"><span>{selectedDocument.mentor ? `Mentor: ${selectedDocument.mentor}` : "Mentor nije unesen"}</span><span>Dodato {formatDate(selectedDocument.createdAt)}</span></div>
+                    </article>
+                  )}
+                </div>
               ))}
             </div>
           )}
 
-          {selectedDocument && (
-            <article className="detail-card">
-              <div className="detail-heading"><span>Pregled dokumenta</span><button type="button" onClick={() => setSelectedDocument(null)} aria-label="Zatvori pregled">×</button></div>
-              <h3>{selectedDocument.title}</h3>
-              <p className="detail-byline">{selectedDocument.author} · {selectedDocument.documentYear ?? "Godina nije unesena"}</p>
-              {selectedDocument.abstractLocal && <p className="detail-abstract">{selectedDocument.abstractLocal}</p>}
-              <div className="detail-footer"><span>{selectedDocument.mentor ? `Mentor: ${selectedDocument.mentor}` : "Mentor nije unesen"}</span><span>Dodato {formatDate(selectedDocument.createdAt)}</span></div>
-            </article>
-          )}
         </section>
       </section>
     </main>
