@@ -5,4 +5,5 @@ dist/
 coverage/
 uploads/
 backend/uploads/
+backend/model-cache/
 *.log

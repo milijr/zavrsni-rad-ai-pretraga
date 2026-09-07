@@ -7,6 +7,7 @@ import express from "express";
 import multer from "multer";
 import { splitIntoChunks } from "./chunking.js";
 import { db } from "./db.js";
+import { cosineSimilarity, createEmbedding } from "./embeddings.js";
 import { extractTextFromFile } from "./text-extraction.js";
 
 const app = express();
@@ -152,6 +153,23 @@ async function saveDocumentChunks(documentId: string, fullText: string): Promise
   }
 }
 
+async function generateDocumentEmbeddings(documentId: string): Promise<number> {
+  const chunks = await db.query<{ id: string; content: string }>(
+    `SELECT id, content FROM document_chunks WHERE document_id = $1 ORDER BY chunk_index`,
+    [documentId],
+  );
+
+  for (const chunk of chunks.rows) {
+    const embedding = await createEmbedding(chunk.content);
+    await db.query(
+      "UPDATE document_chunks SET embedding_json = $1 WHERE id = $2",
+      [JSON.stringify(embedding), chunk.id],
+    );
+  }
+
+  return chunks.rowCount ?? 0;
+}
+
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN ?? "http://localhost:5173",
@@ -210,6 +228,80 @@ app.get("/api/search/classic", async (request, response) => {
     response.json({ query, results: result.rows });
   } catch {
     response.status(500).json({ message: "Pretraga trenutno nije dostupna." });
+  }
+});
+
+app.post("/api/documents/:id/embeddings", async (request, response) => {
+  try {
+    const document = await db.query<{ id: string }>("SELECT id FROM documents WHERE id = $1", [request.params.id]);
+    if (document.rowCount === 0) {
+      response.status(404).json({ message: "Dokument nije pronađen." });
+      return;
+    }
+
+    const chunkCount = await generateDocumentEmbeddings(request.params.id);
+    response.json({ documentId: request.params.id, embeddedChunks: chunkCount });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Nije moguće generisati embeddings.";
+    response.status(500).json({ message });
+  }
+});
+
+app.get("/api/search/semantic", async (request, response) => {
+  const query = typeof request.query.q === "string" ? request.query.q.trim() : "";
+  if (!query) {
+    response.json({ query, results: [] });
+    return;
+  }
+
+  try {
+    const queryEmbedding = await createEmbedding(query);
+    const chunks = await db.query<{
+      documentId: string;
+      title: string;
+      author: string;
+      documentType: string;
+      documentYear: number | null;
+      keywords: string[];
+      content: string;
+      embedding: number[];
+    }>(
+      `SELECT
+        d.id AS "documentId", d.title, d.author,
+        d.document_type AS "documentType", d.document_year AS "documentYear",
+        d.keywords, c.content, c.embedding_json AS embedding
+      FROM document_chunks c
+      JOIN documents d ON d.id = c.document_id
+      WHERE c.embedding_json IS NOT NULL`,
+    );
+
+    const bestMatches = new Map<string, {
+      id: string; title: string; author: string; documentType: string;
+      documentYear: number | null; keywords: string[]; score: number; snippet: string;
+    }>();
+
+    for (const chunk of chunks.rows) {
+      const score = cosineSimilarity(queryEmbedding, chunk.embedding);
+      const current = bestMatches.get(chunk.documentId);
+      if (!current || score > current.score) {
+        bestMatches.set(chunk.documentId, {
+          id: chunk.documentId,
+          title: chunk.title,
+          author: chunk.author,
+          documentType: chunk.documentType,
+          documentYear: chunk.documentYear,
+          keywords: chunk.keywords,
+          score: Number((score * 100).toFixed(2)),
+          snippet: chunk.content.slice(0, 300).trim(),
+        });
+      }
+    }
+
+    const results = [...bestMatches.values()].sort((first, second) => second.score - first.score).slice(0, 10);
+    response.json({ query, results, embeddedChunks: chunks.rowCount ?? 0 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Semantička pretraga nije dostupna.";
+    response.status(500).json({ message });
   }
 });
 
@@ -366,10 +458,12 @@ app.post("/api/documents/upload", (request, response) => {
       );
 
       const chunkCount = await saveDocumentChunks(result.rows[0].id as string, fullText);
+      const embeddedChunks = await generateDocumentEmbeddings(result.rows[0].id as string);
       response.status(201).json({
         document: result.rows[0],
         extractedCharacters: fullText.length,
         chunkCount,
+        embeddedChunks,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Nije moguće obraditi dokument.";
@@ -418,7 +512,8 @@ app.post("/api/documents", async (request, response) => {
     );
 
     const chunkCount = await saveDocumentChunks(result.rows[0].id as string, fullText);
-    response.status(201).json({ document: result.rows[0], chunkCount });
+    const embeddedChunks = await generateDocumentEmbeddings(result.rows[0].id as string);
+    response.status(201).json({ document: result.rows[0], chunkCount, embeddedChunks });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Nije moguće sačuvati dokument.";
     response.status(400).json({ message });

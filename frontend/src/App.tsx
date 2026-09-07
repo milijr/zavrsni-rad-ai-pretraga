@@ -112,6 +112,7 @@ function App() {
   const [fileInputKey, setFileInputKey] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<ClassicSearchResult[]>([]);
+  const [searchMode, setSearchMode] = useState<"classic" | "semantic">("classic");
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [apiStatus, setApiStatus] = useState<"loading" | "connected" | "unavailable">("loading");
@@ -172,7 +173,7 @@ function App() {
     setIsSearching(true);
     setHasSearched(true);
     try {
-      const response = await fetch(`/api/search/classic?q=${encodeURIComponent(query)}`);
+      const response = await fetch(`/api/search/${searchMode}?q=${encodeURIComponent(query)}`);
       if (!response.ok) throw new Error(await apiMessage(response));
       const data = (await response.json()) as { results: ClassicSearchResult[] };
       setSearchResults(data.results);
@@ -261,6 +262,10 @@ function App() {
               {isSearching ? "Pretražujem..." : "Pretraži"}
             </button>
           </form>
+          <div className="search-mode-switch" aria-label="Vrsta pretrage">
+            <button className={searchMode === "classic" ? "active" : ""} type="button" onClick={() => setSearchMode("classic")}>Klasična</button>
+            <button className={searchMode === "semantic" ? "active" : ""} type="button" onClick={() => setSearchMode("semantic")}>Semantička</button>
+          </div>
         </div>
 
         <div className="hero-right">
@@ -296,7 +301,7 @@ function App() {
         <section className="search-results" aria-live="polite">
           <div className="search-results-heading">
             <div>
-              <p className="eyebrow">Klasična full-text pretraga</p>
+              <p className="eyebrow">{searchMode === "classic" ? "Klasična full-text pretraga" : "Semantička pretraga"}</p>
               <h2>{isSearching ? "Pretraživanje..." : `${searchResults.length} rezultata za „${searchQuery.trim()}“`}</h2>
             </div>
             <button type="button" onClick={() => { setHasSearched(false); setSearchResults([]); }}>
@@ -367,7 +372,7 @@ function App() {
               <textarea rows={4} value={form.abstractLocal} onChange={(event) => updateField("abstractLocal", event.target.value)} placeholder="Kratak opis rada" />
             </label>
             <label className="file-upload">
-              <span>Fajl dokumenta</span>
+              <span>Fajl dokumenta <b>*</b></span>
               <span className="file-picker">
                 <input
                   key={fileInputKey}
