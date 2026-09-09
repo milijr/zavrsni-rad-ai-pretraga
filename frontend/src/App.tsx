@@ -41,6 +41,8 @@ type ClassicSearchResult = {
   snippet: string;
 };
 
+type Recommendation = Omit<ClassicSearchResult, "snippet">;
+
 type DocumentForm = {
   title: string;
   author: string;
@@ -113,6 +115,9 @@ function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<ClassicSearchResult[]>([]);
   const [searchMode, setSearchMode] = useState<"classic" | "semantic">("classic");
+  const [comparison, setComparison] = useState<{ classic: ClassicSearchResult[]; semantic: ClassicSearchResult[] } | null>(null);
+  const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  const [isLoadingRecommendations, setIsLoadingRecommendations] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [apiStatus, setApiStatus] = useState<"loading" | "connected" | "unavailable">("loading");
@@ -150,17 +155,43 @@ function App() {
   async function selectDocument(id: string) {
     if (selectedDocument?.id === id) {
       setSelectedDocument(null);
+      setRecommendations([]);
       return;
     }
 
     setError(null);
+    setIsLoadingRecommendations(true);
     try {
       const response = await fetch(`/api/documents/${id}`);
       if (!response.ok) throw new Error(await apiMessage(response));
       const data = (await response.json()) as { document: DocumentDetails };
       setSelectedDocument(data.document);
+      const recommendationResponse = await fetch(`/api/documents/${id}/recommendations`);
+      if (recommendationResponse.ok) {
+        const recommendationData = (await recommendationResponse.json()) as { recommendations: Recommendation[] };
+        setRecommendations(recommendationData.recommendations);
+      } else {
+        setRecommendations([]);
+      }
     } catch (selectionError) {
       setError(selectionError instanceof Error ? selectionError.message : "Nije moguće učitati dokument.");
+    } finally {
+      setIsLoadingRecommendations(false);
+    }
+  }
+
+  async function deleteDocument(id: string) {
+    if (!window.confirm("Da li sigurno želiš da obrišeš ovaj dokument?")) return;
+
+    setError(null);
+    try {
+      const response = await fetch(`/api/documents/${id}`, { method: "DELETE" });
+      if (!response.ok) throw new Error(await apiMessage(response));
+      setSelectedDocument(null);
+      setSuccess("Dokument je obrisan.");
+      await loadDocuments();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Nije moguće obrisati dokument.");
     }
   }
 
@@ -180,6 +211,30 @@ function App() {
     } catch (searchError) {
       setError(searchError instanceof Error ? searchError.message : "Pretraga nije uspjela.");
       setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  }
+
+  async function compareSearch() {
+    const query = searchQuery.trim();
+    if (!query) return;
+
+    setError(null);
+    setIsSearching(true);
+    setComparison(null);
+    try {
+      const [classicResponse, semanticResponse] = await Promise.all([
+        fetch(`/api/search/classic?q=${encodeURIComponent(query)}`),
+        fetch(`/api/search/semantic?q=${encodeURIComponent(query)}`),
+      ]);
+      if (!classicResponse.ok) throw new Error(await apiMessage(classicResponse));
+      if (!semanticResponse.ok) throw new Error(await apiMessage(semanticResponse));
+      const classicData = (await classicResponse.json()) as { results: ClassicSearchResult[] };
+      const semanticData = (await semanticResponse.json()) as { results: ClassicSearchResult[] };
+      setComparison({ classic: classicData.results, semantic: semanticData.results });
+    } catch (comparisonError) {
+      setError(comparisonError instanceof Error ? comparisonError.message : "Poređenje pretraga nije uspjelo.");
     } finally {
       setIsSearching(false);
     }
@@ -242,7 +297,7 @@ function App() {
       <header className="topbar">
         <a className="brand" href="#vrh" aria-label="Početna stranica">
           <span className="brand-mark" aria-hidden="true">📄</span>
-          <span><strong>DOCSME</strong></span>
+          <span><strong>DocuMind</strong></span>
         </a>
       </header>
 
@@ -265,6 +320,7 @@ function App() {
           <div className="search-mode-switch" aria-label="Vrsta pretrage">
             <button className={searchMode === "classic" ? "active" : ""} type="button" onClick={() => setSearchMode("classic")}>Klasična</button>
             <button className={searchMode === "semantic" ? "active" : ""} type="button" onClick={() => setSearchMode("semantic")}>Semantička</button>
+            <button className="compare-button" type="button" onClick={() => void compareSearch()} disabled={isSearching}>Uporedi</button>
           </div>
         </div>
 
@@ -326,6 +382,42 @@ function App() {
                 <span className="card-arrow">→</span>
               </button>
             ))}
+          </div>
+        </section>
+      )}
+
+      {comparison && (
+        <section className="comparison-panel" aria-live="polite">
+          <div className="comparison-heading">
+            <div>
+              <p className="eyebrow">Evaluacija pretrage</p>
+              <h2>Poređenje rezultata za „{searchQuery.trim()}“</h2>
+            </div>
+            <button type="button" onClick={() => setComparison(null)}>Zatvori</button>
+          </div>
+          <div className="comparison-columns">
+            <section className="comparison-column classic-column">
+              <h3>Klasična pretraga <span>{comparison.classic.length}</span></h3>
+              <p>Podudaranje ključnih riječi i teksta.</p>
+              {comparison.classic.length === 0 ? <small>Nema rezultata.</small> : comparison.classic.slice(0, 5).map((result) => (
+                <button key={result.id} type="button" onClick={() => void selectDocument(result.id)}>
+                  <span>{Number(result.score).toFixed(2)}</span>
+                  <strong>{result.title}</strong>
+                  <small>{result.author}</small>
+                </button>
+              ))}
+            </section>
+            <section className="comparison-column semantic-column">
+              <h3>Semantička pretraga <span>{comparison.semantic.length}</span></h3>
+              <p>Sličnost značenja pomoću embeddingsa.</p>
+              {comparison.semantic.length === 0 ? <small>Nema rezultata.</small> : comparison.semantic.slice(0, 5).map((result) => (
+                <button key={result.id} type="button" onClick={() => void selectDocument(result.id)}>
+                  <span>{Number(result.score).toFixed(2)}</span>
+                  <strong>{result.title}</strong>
+                  <small>{result.author}</small>
+                </button>
+              ))}
+            </section>
           </div>
         </section>
       )}
@@ -424,11 +516,25 @@ function App() {
 
                   {selectedDocument?.id === document.id && (
                     <article className="detail-card detail-card-inline">
-                      <div className="detail-heading"><span>Pregled dokumenta</span></div>
+                      <div className="detail-heading"><span>Pregled dokumenta</span><button className="delete-button" type="button" onClick={() => void deleteDocument(selectedDocument.id)}>Obriši</button></div>
                       <h3>{selectedDocument.title}</h3>
                       <p className="detail-byline">{selectedDocument.author} · {selectedDocument.documentYear ?? "Godina nije unesena"}</p>
                       {selectedDocument.abstractLocal && <p className="detail-abstract">{selectedDocument.abstractLocal}</p>}
                       <div className="detail-footer"><span>{selectedDocument.mentor ? `Mentor: ${selectedDocument.mentor}` : "Mentor nije unesen"}</span><span>Dodato {formatDate(selectedDocument.createdAt)}</span></div>
+                      <section className="recommendations">
+                        <h4>Slični dokumenti</h4>
+                        {isLoadingRecommendations ? <p>Traženje preporuka...</p> : recommendations.length === 0 ? <p>Nema dovoljno drugih dokumenata za preporuku.</p> : (
+                          <div className="recommendation-list">
+                            {recommendations.map((recommendation) => (
+                              <button key={recommendation.id} type="button" onClick={() => void selectDocument(recommendation.id)}>
+                                <span>{Number(recommendation.score).toFixed(1)}%</span>
+                                <strong>{recommendation.title}</strong>
+                                <small>{recommendation.author}</small>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </section>
                     </article>
                   )}
                 </div>

@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, unlink } from "node:fs";
 import { extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import cors from "cors";
@@ -305,6 +305,77 @@ app.get("/api/search/semantic", async (request, response) => {
   }
 });
 
+app.get("/api/documents/:id/recommendations", async (request, response) => {
+  try {
+    const rows = await db.query<{
+      documentId: string;
+      title: string;
+      author: string;
+      documentType: string;
+      documentYear: number | null;
+      keywords: string[];
+      embedding: number[];
+    }>(
+      `SELECT
+        d.id AS "documentId", d.title, d.author,
+        d.document_type AS "documentType", d.document_year AS "documentYear",
+        d.keywords, c.embedding_json AS embedding
+      FROM document_chunks c
+      JOIN documents d ON d.id = c.document_id
+      WHERE c.embedding_json IS NOT NULL`,
+    );
+
+    type RecommendationMetadata = {
+      documentId: string;
+      title: string;
+      author: string;
+      documentType: string;
+      documentYear: number | null;
+      keywords: string[];
+    };
+    const documentEmbeddings = new Map<string, { metadata: RecommendationMetadata; embeddings: number[][] }>();
+    for (const row of rows.rows) {
+      const current = documentEmbeddings.get(row.documentId);
+      if (current) {
+        current.embeddings.push(row.embedding);
+      } else {
+        const { embedding, ...metadata } = row;
+        documentEmbeddings.set(row.documentId, { metadata, embeddings: [embedding] });
+      }
+    }
+
+    const selected = documentEmbeddings.get(request.params.id);
+    if (!selected) {
+      response.status(404).json({ message: "Dokument nema generisane embeddings." });
+      return;
+    }
+
+    const averageEmbedding = (embeddings: number[]) => {
+      const target = selected.embeddings;
+      return target.reduce((sum, vector) => sum + cosineSimilarity(embeddings, vector), 0) / target.length;
+    };
+
+    const recommendations = [...documentEmbeddings.entries()]
+      .filter(([documentId]) => documentId !== request.params.id)
+      .map(([id, candidate]) => ({
+        id,
+        title: candidate.metadata.title,
+        author: candidate.metadata.author,
+        documentType: candidate.metadata.documentType,
+        documentYear: candidate.metadata.documentYear,
+        keywords: candidate.metadata.keywords,
+        score: Number((candidate.embeddings.reduce((sum, embedding) => sum + averageEmbedding(embedding), 0) / candidate.embeddings.length * 100).toFixed(2)),
+      }))
+      .sort((first, second) => second.score - first.score)
+      .slice(0, 3);
+
+    response.json({ documentId: request.params.id, recommendations });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Preporuke trenutno nisu dostupne.";
+    response.status(500).json({ message });
+  }
+});
+
 app.get("/api/documents", async (request, response) => {
   const requestedLimit = Number(request.query.limit ?? 20);
   const requestedOffset = Number(request.query.offset ?? 0);
@@ -373,6 +444,32 @@ app.get("/api/documents/:id", async (request, response) => {
     response.json({ document: result.rows[0] });
   } catch {
     response.status(400).json({ message: "Neispravan identifikator dokumenta." });
+  }
+});
+
+app.delete("/api/documents/:id", async (request, response) => {
+  try {
+    const result = await db.query<{ storedFilePath: string | null }>(
+      `DELETE FROM documents
+       WHERE id = $1
+       RETURNING stored_file_path AS "storedFilePath"`,
+      [request.params.id],
+    );
+
+    if (result.rowCount === 0) {
+      response.status(404).json({ message: "Dokument nije pronađen." });
+      return;
+    }
+
+    const storedFilePath = result.rows[0].storedFilePath;
+    if (storedFilePath) {
+      const filePath = fileURLToPath(new URL(`../${storedFilePath.replace(/^uploads[\\/]/, "uploads/")}`, import.meta.url));
+      unlink(filePath, () => undefined);
+    }
+
+    response.json({ deleted: true, documentId: request.params.id });
+  } catch {
+    response.status(400).json({ message: "Nije moguće obrisati dokument." });
   }
 });
 
