@@ -10,34 +10,72 @@ Web aplikacija za semantičku pretragu i preporuku dokumenata, razvijena kao dio
 
 ## Pokretanje lokalno
 
-Potrebni su Node.js (LTS) i Docker Desktop.
+Potrebni su Node.js (LTS) i PostgreSQL 16 (sa `pgvector` ekstenzijom).
 
-1. Pokreni bazu iz korijena projekta:
+### 1. Pripremi bazu podataka
 
-   ```bash
-   docker compose up -d
-   ```
+Prvo kreiraj PostgreSQL bazu i pokreni SQL skripta za inicijalizaciju:
 
-2. U prvom terminalu pokreni backend:
+```powershell
+# SQL skripta iz database/init/ foldera trebaju biti izvršeni
+# Preporučeno je koristiti pgAdmin ili psql:
+psql -U postgres -d postgres -f database\init\001_extensions.sql
+psql -U postgres -d postgres -f database\init\002_document_schema.sql
+psql -U postgres -d postgres -f database\init\003_local_embeddings.sql
+```
 
-   ```bash
-   cd backend
-   copy .env.example .env
-   npm install
-   npm run dev
-   ```
+ili direktno kreiraj bazu:
 
-3. U drugom terminalu pokreni frontend:
+```powershell
+createdb ai_search
+psql -U postgres -d ai_search -f database\init\001_extensions.sql
+psql -U postgres -d ai_search -f database\init\002_document_schema.sql
+psql -U postgres -d ai_search -f database\init\003_local_embeddings.sql
+```
 
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
+### 2. Pokreni backend (PowerShell terminal 1)
 
-Otvori `http://localhost:5173`. Frontend provjerava API na `http://localhost:4000/api/health` preko Vite proxy-ja.
+```powershell
+cd backend
+Copy-Item .env.example .env
+# Uredi .env sa svojim PostgreSQL kredencijalima i CONNECTION_STRING
+npm install
+npm run dev
+```
 
-## Napomena
+API će biti dostupan na `http://localhost:4000`
 
-Podaci baze se čuvaju u Docker volume-u `postgres_data`. Za potpuno brisanje lokalne baze koristi se `docker compose down -v`.
+### 3. Pokreni frontend (PowerShell terminal 2)
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend će biti dostupan na `http://localhost:5173`. Automatski će proxy-ati API zahtjeve na `http://localhost:4000/api/*`
+
+## Konfiguracija
+
+Kreiraj `.env` fajl u `backend/` folderu sa sljedećim:
+
+```env
+DATABASE_URL=postgresql://username:password@localhost:5432/ai_search
+PORT=4000
+CORS_ORIGIN=http://localhost:5173
+```
+
+## Razvoj
+
+- **Backend**: `npm run dev` — pokreće TypeScript sa nodemon watcherom
+- **Frontend**: `npm run dev` — pokreće Vite dev server sa HMR-om
+
+Za build produkcije:
+```powershell
+# Backend
+npm run build
+
+# Frontend
+npm run build
+```
 
